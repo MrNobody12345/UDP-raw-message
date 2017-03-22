@@ -2,22 +2,31 @@
 
 int main(void) {
   int master_sock;
-  int psize;
+  int slen;
+  int one = 1;
+  int i;
+  const int *val = &one;
   /* datagram to represent the packet */
-  char datagram[4096], source_ip[32], *data, *pseudogram;
+  char datagram[4096], source_ip[32], *data;
   struct iphdr *iph;
   struct udphdr *udph;
   struct sockaddr_in sin;
+  struct sockaddr_in client;
 
-  struct pseudo_header psh;
   /* create a raw socket of type IPPROTO */
-  master_sock = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
+  master_sock = socket(AF_INET, SOCK_RAW, IPPROTO_UDP);
 
   if (master_sock == -1) {
     /* socket creation failed, may be because of non-root privileges */
     perror("Failed to create raw socket");
     exit(1);
   }
+  /* inform the kernel do not fill up the packet structure. we will build our own...*/
+  if (setsockopt(master_sock, IPPROTO_IP, IP_HDRINCL, val, sizeof(one)) < 0) {
+    perror("setsockopt() error");
+    exit(-1);
+  } else
+    printf("setsockopt() is OK.\n");
 
   iph = (struct iphdr *) datagram;
   udph = (struct udphdr *) (datagram + sizeof(struct iphdr));
@@ -29,11 +38,14 @@ int main(void) {
   data = datagram + sizeof(struct iphdr) + sizeof(struct udphdr);
   strcpy(data, "Hello, world!");
 
-  strcpy(source_ip, "192.168.0.104");
+  strcpy(source_ip, "127.0.0.1");
 
   sin.sin_family = AF_INET;
   sin.sin_port = htons(8888);
   sin.sin_addr.s_addr = inet_addr("127.0.0.1");
+  client.sin_family = AF_INET;
+  client.sin_port = htons(8822);
+  client.sin_addr.s_addr = INADDR_ANY;
 
   /* fill in the IP Header */
   iph->ihl = 5;
@@ -52,33 +64,29 @@ int main(void) {
   iph->check = CalcIPChecksum((unsigned short*) iph, iph->ihl << 2);
 
   /* UDP header */
-  udph->source = htons(6666);
+  udph->source = htons(8822);
   udph->dest = htons(8888);
   udph->len = htons(8 + strlen(data)); /* udp header size */
   udph->check = 0; /* leave checksum 0 now, filled later by pseudo header */
 
-  /* now the UDP checksum using the pseudo header */
-  psh.source_address = inet_addr(source_ip);
-  psh.dest_address = sin.sin_addr.s_addr;
-  psh.placeholder = 0;
-  psh.protocol = IPPROTO_UDP;
-  psh.udp_length = htons(sizeof(struct udphdr) + strlen(data));
-
-  psize = sizeof(struct pseudo_header) + sizeof(struct udphdr) + strlen(data);
-
-  pseudogram = (char *) malloc(sizeof(char) * psize);
-  memcpy(pseudogram, (char*) &psh, sizeof(struct pseudo_header));
-  memcpy(pseudogram + sizeof(struct pseudo_header), udph,
-         sizeof(struct udphdr) + strlen(data));
-
   udph->check = CalcUDPChecksum(iph, (unsigned short *) udph);
-
-  if (sendto(s, datagram, iph->tot_len, 0, (struct sockaddr *) &sin,
-             sizeof(sin)) < 0) {
+  slen = sizeof(sin);
+  if (sendto(master_sock, datagram, iph->tot_len, 0, (struct sockaddr *) &sin,
+             slen) == -1) {
     perror("sendto failed");
   } else {
     printf("Packet Send. Length : %d \n", iph->tot_len);
   }
-  free(pseudogram);
+  /* zero out the packet buffer */
+  memset(datagram, 0, 4096);
+  /* try to receive some data, this is a blocking call */
+  if (recvfrom(master_sock, datagram, 512, 0, (struct sockaddr *) &sin,
+             &slen) == -1) {
+    perror("recvfrom");
+    return EXIT_FAILURE;
+  }
+
+  printf("Echo: %s", datagram + sizeof(struct iphdr) + sizeof(struct udphdr));
+
   return 0;
 }
